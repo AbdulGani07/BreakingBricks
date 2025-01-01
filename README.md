@@ -103,7 +103,3 @@ For more details, please see the [LICENSE](LICENSE) file.
 
 - The concept of the game is inspired by the classic "Breakout" game.
 - Special thanks to the open-source community for providing inspiration and code examples.
-
----
-
-Feel free to modify any sections as per your specific needs. This README will help others understand your project, how to set it up, and how to contribute!
