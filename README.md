@@ -89,7 +89,15 @@ Contributions are welcome! If you'd like to contribute to the project, follow th
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the **Proprietary License**.
+
+- You may use the code for personal, non-commercial purposes only.
+- You may not modify, distribute, or sell the code without explicit permission from the author.
+- For commercial use or redistribution, please contact me at abdulgani10525@gmail.com.
+- All rights reserved.
+
+For more details, please see the [LICENSE](LICENSE) file.
+
 
 ## Acknowledgments
 
