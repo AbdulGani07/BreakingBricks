@@ -2,7 +2,14 @@ import React, { useEffect, useRef, useCallback } from 'react';
 import { GameEngine, CANVAS_WIDTH, CANVAS_HEIGHT } from '../game/GameEngine';
 import { GameStatus } from '../types';
 import confetti from 'canvas-confetti';
-import { Play, RotateCcw, Trophy, Award } from 'lucide-react';
+import { Award } from 'lucide-react';
+import { renderBrick } from '../game/Brick';
+import {
+  renderPowerUpItem,
+  renderLaserBolts,
+  renderBottomShield,
+  renderPaddleAttachments,
+} from '../game/PowerUp';
 
 interface GameCanvasProps {
   engine: GameEngine;
@@ -44,10 +51,19 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         keysPressed.current.left = true;
       } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
         keysPressed.current.right = true;
-      } else if (e.code === 'Space' || e.code === 'KeyP') {
+      } else if (e.code === 'Space') {
         if (engine.status === 'idle') {
           engine.startCountdown();
-        } else if (engine.status === 'playing' || engine.status === 'paused') {
+        } else if (engine.status === 'playing') {
+          const launched = engine.launchStuckBalls();
+          if (!launched && !engine.paddle.hasLaser) {
+            engine.togglePause();
+          }
+        } else if (engine.status === 'paused') {
+          engine.togglePause();
+        }
+      } else if (e.code === 'KeyP') {
+        if (engine.status === 'playing' || engine.status === 'paused') {
           engine.togglePause();
         }
       }
@@ -75,8 +91,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const canvas = canvasRef.current;
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
-      const scaleX = CANVAS_WIDTH / rect.width;
-      const mouseX = (e.clientX - rect.left) * scaleX;
+      if (rect.width === 0) return;
+      const mouseX = ((e.clientX - rect.left) / rect.width) * CANVAS_WIDTH;
       engine.movePaddleTo(mouseX);
     },
     [engine]
@@ -85,8 +101,48 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const handleCanvasClick = useCallback(() => {
     if (engine.status === 'idle') {
       engine.startCountdown();
+    } else if (engine.status === 'playing') {
+      engine.launchStuckBalls();
     }
   }, [engine]);
+
+  // Dynamic High-DPI / Retina responsive canvas buffer sizing
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+
+    const updateCanvasBackingStore = () => {
+      const rect = container.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+
+      // Cap at 3x DPR to avoid excessive GPU memory allocation on ultra-dense displays
+      const dpr = Math.min(window.devicePixelRatio || 1, 3);
+      const targetWidth = Math.round(rect.width * dpr);
+      const targetHeight = Math.round(rect.height * dpr);
+
+      if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+      }
+    };
+
+    updateCanvasBackingStore();
+
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => {
+        updateCanvasBackingStore();
+      });
+      resizeObserver.observe(container);
+    }
+
+    window.addEventListener('resize', updateCanvasBackingStore);
+    return () => {
+      if (resizeObserver) resizeObserver.disconnect();
+      window.removeEventListener('resize', updateCanvasBackingStore);
+    };
+  }, []);
 
   // Main Render & Animation Loop
   useEffect(() => {
@@ -96,26 +152,52 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     if (!ctx) return;
 
     let animationFrameId: number;
+    let lastTime: number | null = null;
+    const MAX_DELTA = 0.05; // 50ms clamp (min 20 FPS threshold) to prevent tunneling or leaps on lag/tab-switch
 
-    const render = () => {
-      // 1. Keyboard paddle movement
+    const render = (timestamp: DOMHighResTimeStamp) => {
+      if (lastTime === null) {
+        lastTime = timestamp;
+      }
+      const rawDelta = (timestamp - lastTime) / 1000;
+      lastTime = timestamp;
+
+      // Clamp deltaTime to safe boundaries [0, MAX_DELTA]
+      const deltaTime = Math.min(Math.max(rawDelta, 0), MAX_DELTA);
+      const timeScale = deltaTime * 60; // 1.0 at standard 60 FPS reference
+
+      // 1. Keyboard paddle movement (scaled by timeScale for frame-rate independence)
       if (keysPressed.current.left) {
-        engine.movePaddleBy(-engine.paddle.speed);
+        engine.movePaddleBy(-engine.paddle.speed * timeScale);
       }
       if (keysPressed.current.right) {
-        engine.movePaddleBy(engine.paddle.speed);
+        engine.movePaddleBy(engine.paddle.speed * timeScale);
       }
 
-      // 2. Physics update
-      engine.update();
+      // 2. Physics update with frame-independent deltaTime
+      engine.update(deltaTime);
 
       // Check status sync
       if (engine.status !== status) {
         onStatusChange(engine.status);
       }
 
-      // 3. Render Canvas
-      ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+      // 3. Render Canvas with High-DPI Transform
+      const physicalWidth = canvas.width;
+      const physicalHeight = canvas.height;
+
+      // Clear physical backing store
+      ctx.clearRect(0, 0, physicalWidth, physicalHeight);
+
+      // Save context and apply logical scale transformation
+      ctx.save();
+      const scaleX = physicalWidth / CANVAS_WIDTH;
+      const scaleY = physicalHeight / CANVAS_HEIGHT;
+      ctx.scale(scaleX, scaleY);
+      ctx.imageSmoothingEnabled = true;
+
+      // 1. Camera Screen Shake (Applied to logical coordinate system)
+      ctx.translate(engine.shakeOffset.x, engine.shakeOffset.y);
 
       // Background subtle grid
       ctx.fillStyle = '#0f172a'; // slate-900
@@ -145,117 +227,222 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Draw Bricks
-      for (const brick of engine.bricks) {
-        if (!brick.visible) continue;
-
-        // Brick Body
-        ctx.fillStyle = brick.color;
-        ctx.fillRect(brick.x, brick.y, brick.width, brick.height);
-
-        // Brick Top Shine
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
-        ctx.fillRect(brick.x, brick.y, brick.width, 3);
-
-        // Brick Border (as in original Brick.java)
-        ctx.strokeStyle = brick.borderColor;
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(brick.x, brick.y, brick.width, brick.height);
-
-        // Power-up marker
-        if (brick.powerUp) {
-          ctx.fillStyle = '#ffffff';
-          ctx.beginPath();
-          ctx.arc(brick.x + brick.width / 2, brick.y + brick.height / 2, 2.5, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-
-      // Draw Power-ups
-      for (const p of engine.powerUps) {
+      // Draw Shockwaves (Expanding explosion shockwaves)
+      for (const sw of engine.shockwaves) {
         ctx.save();
-        ctx.fillStyle = '#38bdf8';
+        ctx.globalAlpha = Math.max(0, sw.alpha);
+        ctx.strokeStyle = sw.color;
+        ctx.lineWidth = sw.lineWidth;
         ctx.beginPath();
-        ctx.roundRect(p.x, p.y, p.width, p.height, 4);
-        ctx.fill();
-
-        ctx.strokeStyle = '#bae6fd';
-        ctx.lineWidth = 1.5;
+        ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2);
         ctx.stroke();
-
-        ctx.fillStyle = '#0f172a';
-        ctx.font = 'bold 9px monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        let label = '★';
-        if (p.type === 'extra_life') label = '♥';
-        if (p.type === 'double_ball') label = '2x';
-        if (p.type === 'bonus_points') label = '+';
-        if (p.type === 'expand_paddle') label = '↔';
-        ctx.fillText(label, p.x + p.width / 2, p.y + p.height / 2);
         ctx.restore();
       }
 
-      // Draw Particles
+      // Draw Impact Flashes (Radial bright bursts)
+      for (const flash of engine.impactFlashes) {
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, flash.alpha);
+        const grad = ctx.createRadialGradient(
+          flash.x,
+          flash.y,
+          0,
+          flash.x,
+          flash.y,
+          flash.radius
+        );
+        grad.addColorStop(0, '#ffffff');
+        grad.addColorStop(0.4, flash.color);
+        grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(flash.x, flash.y, flash.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Draw Bottom Safety Shield Barrier
+      if (engine.shieldActive) {
+        renderBottomShield(ctx, CANVAS_HEIGHT - 10, CANVAS_WIDTH, engine.gameTime);
+      }
+
+      // Draw Bricks (Modular system with cracks, armor plates, gold rivets, moving tracks, and explosions)
+      for (const brick of engine.bricks) {
+        renderBrick(ctx, brick, engine.gameTime);
+      }
+
+      // Draw Power-ups (Modular 3D styled items with pulse glows)
+      for (const p of engine.powerUps) {
+        renderPowerUpItem(ctx, p, engine.gameTime);
+      }
+
+      // Draw Laser Projectiles
+      renderLaserBolts(ctx, engine.laserBolts);
+
+      // Draw Destruction Particles (Debris Shards & Spark Motes)
       for (const pt of engine.particles) {
         ctx.save();
-        ctx.globalAlpha = pt.alpha;
-        ctx.fillStyle = pt.color;
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, pt.radius, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.globalAlpha = Math.max(0, pt.alpha);
+        if (pt.type === 'shard' && pt.width && pt.height) {
+          ctx.translate(pt.x, pt.y);
+          if (pt.rotation) ctx.rotate(pt.rotation);
+          ctx.fillStyle = pt.color;
+          ctx.fillRect(-pt.width / 2, -pt.height / 2, pt.width, pt.height);
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(-pt.width / 2, -pt.height / 2, pt.width, pt.height);
+        } else {
+          ctx.fillStyle = pt.color;
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, Math.max(0.5, pt.radius), 0, Math.PI * 2);
+          ctx.fill();
+        }
         ctx.restore();
       }
 
-      // Draw Floating Texts
-      for (const ft of engine.floatingTexts) {
+      // Draw Paddle (with Movement Glow & Impact Squash Animation)
+      const squash = engine.paddle.squashFactor || 0;
+      const paddleW = engine.paddle.width * (1 + squash * 0.2);
+      const paddleH = engine.paddle.height * (1 - squash * 0.38);
+      const paddleX = engine.paddle.x - (paddleW - engine.paddle.width) / 2;
+      const paddleY = engine.paddle.y + (engine.paddle.height - paddleH);
+
+      // Paddle Movement Glow (Thruster plasma streak on active motion)
+      const paddleVx = engine.paddle.velocity || 0;
+      const absVx = Math.abs(paddleVx);
+      if (absVx > 0.4) {
         ctx.save();
-        ctx.globalAlpha = ft.alpha;
-        ctx.fillStyle = ft.color;
-        ctx.font = 'bold 12px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(ft.text, ft.x, ft.y);
+        const glowWidth = Math.min(32, absVx * 3.5);
+        if (paddleVx > 0) {
+          // Moving Right -> plasma trail from left edge
+          const trailGrad = ctx.createLinearGradient(
+            paddleX,
+            paddleY,
+            paddleX - glowWidth,
+            paddleY
+          );
+          trailGrad.addColorStop(0, 'rgba(56, 189, 248, 0.65)');
+          trailGrad.addColorStop(1, 'rgba(56, 189, 248, 0)');
+          ctx.fillStyle = trailGrad;
+          ctx.fillRect(paddleX - glowWidth, paddleY, glowWidth, paddleH);
+        } else {
+          // Moving Left -> plasma trail from right edge
+          const trailGrad = ctx.createLinearGradient(
+            paddleX + paddleW,
+            paddleY,
+            paddleX + paddleW + glowWidth,
+            paddleY
+          );
+          trailGrad.addColorStop(0, 'rgba(56, 189, 248, 0.65)');
+          trailGrad.addColorStop(1, 'rgba(56, 189, 248, 0)');
+          ctx.fillStyle = trailGrad;
+          ctx.fillRect(paddleX + paddleW, paddleY, glowWidth, paddleH);
+        }
         ctx.restore();
       }
 
-      // Draw Paddle (original Java Paddle is blue at x, y, width, height)
+      // Paddle Ambient Floor Glow
+      ctx.save();
+      const underGlow = ctx.createRadialGradient(
+        paddleX + paddleW / 2,
+        paddleY + paddleH + 2,
+        2,
+        paddleX + paddleW / 2,
+        paddleY + paddleH + 2,
+        paddleW * 0.65
+      );
+      underGlow.addColorStop(0, 'rgba(56, 189, 248, 0.4)');
+      underGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
+      ctx.fillStyle = underGlow;
+      ctx.fillRect(paddleX - 15, paddleY + paddleH, paddleW + 30, 8);
+      ctx.restore();
+
+      // Paddle Body
       ctx.save();
       ctx.fillStyle = engine.paddle.color;
       ctx.beginPath();
-      ctx.roundRect(
-        engine.paddle.x,
-        engine.paddle.y,
-        engine.paddle.width,
-        engine.paddle.height,
-        3
-      );
+      ctx.roundRect(paddleX, paddleY, paddleW, paddleH, 3);
       ctx.fill();
 
-      // Paddle subtle top highlight
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-      ctx.fillRect(engine.paddle.x + 2, engine.paddle.y + 1, engine.paddle.width - 4, 2);
+      // Paddle top specular line
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+      ctx.fillRect(paddleX + 2, paddleY + 1, Math.max(0, paddleW - 4), 2);
 
       ctx.strokeStyle = '#1d4ed8';
       ctx.lineWidth = 1;
       ctx.stroke();
       ctx.restore();
 
-      // Draw Balls (original Java Ball is red circle of radius 10)
+      // Draw Paddle Modular Attachments (Laser Blasters & Magnetic Coils)
+      renderPaddleAttachments(ctx, engine.paddle, engine.gameTime);
+
+      // Draw Balls (with Glowing Trail, Speed-based Glow, Fireball Aura, and Impact Flash)
       for (const ball of engine.balls) {
+        const glowInfo = engine.getBallColorAndGlow(ball);
+        const ballCenterX = ball.x + ball.radius;
+        const ballCenterY = ball.y + ball.radius;
+
+        // 1. Ball Glowing Trail
+        if (ball.trail && ball.trail.length > 0) {
+          for (let i = ball.trail.length - 1; i >= 0; i--) {
+            const node = ball.trail[i];
+            ctx.save();
+            ctx.globalAlpha = Math.max(0, node.alpha * 0.65);
+            ctx.fillStyle = node.color || glowInfo.glowColor;
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, Math.max(1, node.radius), 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+        }
+
+        // 2. Speed-based Glow Aura (or blazing Fireball plasma ring)
         ctx.save();
-        ctx.fillStyle = ball.color;
+        if (ball.isFireball) {
+          const fireRadius = ball.radius * (2.2 + Math.sin(engine.gameTime * 14) * 0.3);
+          const fireGrad = ctx.createRadialGradient(
+            ballCenterX,
+            ballCenterY,
+            ball.radius * 0.3,
+            ballCenterX,
+            ballCenterY,
+            fireRadius
+          );
+          fireGrad.addColorStop(0, '#f97316');
+          fireGrad.addColorStop(0.5, '#ef4444');
+          fireGrad.addColorStop(1, 'rgba(239, 68, 68, 0)');
+          ctx.fillStyle = fireGrad;
+          ctx.beginPath();
+          ctx.arc(ballCenterX, ballCenterY, fireRadius, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          const auraRadius = ball.radius * (1.8 + glowInfo.speedRatio * 1.5);
+          const auraGrad = ctx.createRadialGradient(
+            ballCenterX,
+            ballCenterY,
+            ball.radius * 0.35,
+            ballCenterX,
+            ballCenterY,
+            auraRadius
+          );
+          auraGrad.addColorStop(0, glowInfo.glowColor);
+          auraGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+          ctx.fillStyle = auraGrad;
+          ctx.beginPath();
+          ctx.arc(ballCenterX, ballCenterY, auraRadius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+
+        // 3. Ball Core Body (Color shifts according to speed or Fireball mode)
+        ctx.save();
+        ctx.fillStyle = ball.isFireball ? '#ea580c' : glowInfo.baseColor;
         ctx.beginPath();
-        ctx.arc(
-          ball.x + ball.radius,
-          ball.y + ball.radius,
-          ball.radius,
-          0,
-          Math.PI * 2
-        );
+        ctx.arc(ballCenterX, ballCenterY, ball.radius, 0, Math.PI * 2);
         ctx.fill();
 
         // Specular 3D highlight
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.fillStyle = ball.isFireball ? 'rgba(254, 240, 138, 0.8)' : 'rgba(255, 255, 255, 0.65)';
         ctx.beginPath();
         ctx.arc(
           ball.x + ball.radius * 0.7,
@@ -266,9 +453,88 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         );
         ctx.fill();
 
-        ctx.strokeStyle = '#991b1b';
+        // 4. Impact Flash (White-hot burst on hit)
+        if (ball.impactFlash && ball.impactFlash > 0) {
+          ctx.fillStyle = '#ffffff';
+          ctx.globalAlpha = Math.min(1, ball.impactFlash * 0.95);
+          ctx.beginPath();
+          ctx.arc(ballCenterX, ballCenterY, ball.radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.strokeStyle = ball.isFireball ? '#7c2d12' : '#991b1b';
         ctx.lineWidth = 1;
         ctx.stroke();
+        ctx.restore();
+      }
+
+      // Draw Floating Texts (Score numbers with scale pop & Combo Messages)
+      for (const ft of engine.floatingTexts) {
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, ft.alpha);
+        const scale = ft.scale || 1.0;
+        ctx.translate(ft.x, ft.y);
+        ctx.scale(scale, scale);
+
+        if (ft.isCombo) {
+          // Celebratory combo typography
+          ctx.font = '900 13px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.lineWidth = 3.5;
+          ctx.strokeStyle = '#020617';
+          ctx.strokeText(ft.text, 0, 0);
+
+          ctx.fillStyle = ft.color;
+          ctx.fillText(ft.text, 0, 0);
+        } else {
+          // Floating score numbers
+          ctx.font = 'bold 12px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.lineWidth = 2.5;
+          ctx.strokeStyle = '#020617';
+          ctx.strokeText(ft.text, 0, 0);
+
+          ctx.fillStyle = ft.color;
+          ctx.fillText(ft.text, 0, 0);
+        }
+        ctx.restore();
+      }
+
+      // Impact Feedback Vignette (Edge red alert flash)
+      if (engine.impactVignette > 0) {
+        ctx.save();
+        ctx.globalAlpha = Math.min(engine.impactVignette * 0.45, 0.45);
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 10;
+        ctx.strokeRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        ctx.restore();
+      }
+
+      // Draw Level Complete Animation Banner
+      if (engine.status === 'level_cleared') {
+        ctx.save();
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        const bannerY = CANVAS_HEIGHT / 2;
+        ctx.fillStyle = 'rgba(2, 6, 23, 0.9)';
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(CANVAS_WIDTH / 2 - 150, bannerY - 45, 300, 90, 12);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#38bdf8';
+        ctx.font = '900 24px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('LEVEL CLEARED!', CANVAS_WIDTH / 2, bannerY - 8);
+
+        ctx.fillStyle = '#fde047';
+        ctx.font = 'bold 14px monospace';
+        ctx.fillText('+500 LEVEL BONUS', CANVAS_WIDTH / 2, bannerY + 22);
         ctx.restore();
       }
 
@@ -294,6 +560,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.restore();
       }
 
+      // Restore outer High-DPI context scale
+      ctx.restore();
+
       animationFrameId = requestAnimationFrame(render);
     };
 
@@ -309,60 +578,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       <canvas
         ref={canvasRef}
         id="breaking-bricks-canvas"
-        width={CANVAS_WIDTH}
-        height={CANVAS_HEIGHT}
         onPointerMove={handlePointerMove}
+        onPointerDown={handlePointerMove}
         onClick={handleCanvasClick}
-        className="w-full h-full block cursor-none"
+        className="w-full h-full block cursor-none touch-none"
       />
-
-      {/* Start Screen Overlay (Matching original BreakingBricks.java Click to Start Game) */}
-      {status === 'idle' && (
-        <div
-          id="overlay-idle"
-          onClick={handleCanvasClick}
-          className="absolute inset-0 bg-slate-950/80 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-center cursor-pointer select-none transition-all duration-300"
-        >
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-red-500 to-amber-500 flex items-center justify-center mb-4 shadow-lg shadow-red-500/20 animate-pulse">
-            <Play className="w-8 h-8 text-white fill-white ml-1" />
-          </div>
-          <h2 className="text-3xl font-black text-white tracking-tight mb-2">
-            Breaking Bricks
-          </h2>
-          <p className="text-slate-300 text-sm max-w-xs mb-6">
-            Bounce the ball, break every brick, and conquer all 10 arcade levels.
-          </p>
-          <button
-            id="btn-click-to-start"
-            className="px-6 py-2.5 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg shadow-lg shadow-red-600/30 transition-transform active:scale-95 flex items-center gap-2"
-          >
-            <Play className="w-4 h-4 fill-white" /> Click to Start Game
-          </button>
-          <span className="text-[11px] text-slate-500 mt-3 font-mono">
-            Or press Space to begin
-          </span>
-        </div>
-      )}
-
-      {/* Paused Screen Overlay */}
-      {status === 'paused' && (
-        <div
-          id="overlay-paused"
-          className="absolute inset-0 bg-slate-950/85 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-center select-none"
-        >
-          <h3 className="text-2xl font-black text-amber-400 mb-2 tracking-wide uppercase">
-            Game Paused
-          </h3>
-          <p className="text-slate-300 text-sm mb-5">Take a breath, champion.</p>
-          <button
-            id="btn-resume"
-            onClick={() => engine.togglePause()}
-            className="px-6 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg shadow-lg transition-transform active:scale-95 flex items-center gap-2 cursor-pointer"
-          >
-            <Play className="w-4 h-4 fill-current" /> Resume Game
-          </button>
-        </div>
-      )}
 
       {/* Level Cleared Overlay */}
       {status === 'level_cleared' && (
@@ -377,96 +597,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           <p className="text-slate-300 text-sm">
             Preparing Level {engine.level + 1}...
           </p>
-        </div>
-      )}
-
-      {/* Game Over Screen */}
-      {status === 'game_over' && (
-        <div
-          id="overlay-game-over"
-          className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center select-none"
-        >
-          <div className="w-12 h-12 rounded-xl bg-red-950 border border-red-800/80 flex items-center justify-center mb-3">
-            <RotateCcw className="w-6 h-6 text-red-400" />
-          </div>
-          <h2 className="text-3xl font-black text-red-500 tracking-tight mb-1">
-            Game Over
-          </h2>
-          <p className="text-slate-400 text-sm mb-4">
-            You made it to Level {engine.level} with {engine.bricksBroken} bricks broken!
-          </p>
-
-          <div className="flex items-center gap-6 bg-slate-900/90 border border-slate-800 px-6 py-3 rounded-xl mb-5">
-            <div className="text-center">
-              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                Final Score
-              </span>
-              <span className="text-2xl font-black text-amber-400 font-mono">
-                {engine.score}
-              </span>
-            </div>
-            <div className="w-px h-8 bg-slate-800" />
-            <div className="text-center">
-              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                High Score
-              </span>
-              <span className="text-2xl font-black text-slate-200 font-mono">
-                {engine.highScore}
-              </span>
-            </div>
-          </div>
-
-          <button
-            id="btn-play-again"
-            onClick={() => engine.restartGame()}
-            className="px-6 py-2.5 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg shadow-lg shadow-red-600/30 transition-transform active:scale-95 flex items-center gap-2 cursor-pointer"
-          >
-            <RotateCcw className="w-4 h-4" /> Play Again
-          </button>
-        </div>
-      )}
-
-      {/* Game Won Screen */}
-      {status === 'game_won' && (
-        <div
-          id="overlay-game-won"
-          className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center select-none"
-        >
-          <Trophy className="w-14 h-14 text-amber-400 mb-3 animate-pulse" />
-          <h2 className="text-3xl font-black text-amber-400 tracking-tight mb-1">
-            Victory! You Beat The Game!
-          </h2>
-          <p className="text-slate-300 text-sm max-w-sm mb-4">
-            Incredible skill! You conquered all 10 levels of Breaking Bricks!
-          </p>
-
-          <div className="flex items-center gap-6 bg-slate-900/90 border border-slate-800 px-6 py-3 rounded-xl mb-5">
-            <div className="text-center">
-              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                Final Score
-              </span>
-              <span className="text-2xl font-black text-amber-400 font-mono">
-                {engine.score}
-              </span>
-            </div>
-            <div className="w-px h-8 bg-slate-800" />
-            <div className="text-center">
-              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                High Score
-              </span>
-              <span className="text-2xl font-black text-emerald-400 font-mono">
-                {engine.highScore}
-              </span>
-            </div>
-          </div>
-
-          <button
-            id="btn-win-play-again"
-            onClick={() => engine.restartGame()}
-            className="px-6 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg shadow-lg shadow-amber-500/30 transition-transform active:scale-95 flex items-center gap-2 cursor-pointer"
-          >
-            <RotateCcw className="w-4 h-4" /> Play Again
-          </button>
         </div>
       )}
     </div>
