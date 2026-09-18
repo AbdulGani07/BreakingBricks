@@ -1,6 +1,6 @@
 {
   "name": "Breaking Bricks",
-  "description": "Classic arcade brick-breaking game with responsive paddle controls, multiple levels, and score tracking.",
+  "description": "Production-grade embeddable HTML5 arcade brick-breaking game platform with developer SDK, secure score validation, analytics, and interactive playground.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

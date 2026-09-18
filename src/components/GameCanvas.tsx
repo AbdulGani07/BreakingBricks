@@ -85,7 +85,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     };
   }, [engine]);
 
-  // Pointer & Touch handlers
+  // Pointer & Touch handlers with pointer capture for buttery-smooth mobile steering
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current;
@@ -96,6 +96,45 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       engine.movePaddleTo(mouseX);
     },
     [engine]
+  );
+
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {
+        // Fallback for browsers without pointer capture
+      }
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0) return;
+      const mouseX = ((e.clientX - rect.left) / rect.width) * CANVAS_WIDTH;
+      engine.movePaddleTo(mouseX);
+
+      // On tap / touch down: launch stuck balls or fire lasers if playing, or start countdown if idle
+      if (engine.status === 'idle') {
+        engine.startCountdown();
+      } else if (engine.status === 'playing') {
+        engine.launchStuckBalls();
+      }
+    },
+    [engine]
+  );
+
+  const handlePointerUp = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      try {
+        if (canvas.hasPointerCapture(e.pointerId)) {
+          canvas.releasePointerCapture(e.pointerId);
+        }
+      } catch {
+        // Ignore
+      }
+    },
+    []
   );
 
   const handleCanvasClick = useCallback(() => {
@@ -579,7 +618,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ref={canvasRef}
         id="breaking-bricks-canvas"
         onPointerMove={handlePointerMove}
-        onPointerDown={handlePointerMove}
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
         onClick={handleCanvasClick}
         className="w-full h-full block cursor-none touch-none"
       />

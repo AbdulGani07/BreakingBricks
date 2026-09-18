@@ -1,11 +1,45 @@
 {
   "name": "breaking-bricks",
-  "private": true,
-  "version": "1.0.0",
+  "version": "1.2.0",
+  "description": "Production-grade embeddable HTML5 arcade brick-breaking game platform and SDK",
   "type": "module",
+  "main": "./dist/breaking-bricks.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/breaking-bricks.js"
+    },
+    "./v1": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/breaking-bricks.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "EMBEDDING.md"
+  ],
+  "keywords": [
+    "game",
+    "arcade",
+    "breakout",
+    "brick-breaker",
+    "sdk",
+    "embed",
+    "html5-canvas",
+    "typescript",
+    "react"
+  ],
+  "license": "MIT",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 3000",
-    "build": "vite build",
+    "build": "vite build && node scripts/build-sdk.mjs",
+    "build:sdk": "node scripts/build-sdk.mjs",
     "preview": "vite preview --host 0.0.0.0 --port 3000",
     "lint": "tsc --noEmit"
   },
@@ -24,6 +58,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.6.3",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "vite-plugin-pwa": "^1.3.0"
   }
 }

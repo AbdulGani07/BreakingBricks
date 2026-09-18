@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 interface AnimatedScoreProps {
   value: number;
@@ -7,11 +7,12 @@ interface AnimatedScoreProps {
 
 export const AnimatedScore: React.FC<AnimatedScoreProps> = ({ value, className = '' }) => {
   const [displayValue, setDisplayValue] = useState(value);
+  const prevValueRef = useRef(value);
 
   useEffect(() => {
-    if (displayValue === value) return;
+    const startValue = prevValueRef.current;
+    if (startValue === value) return;
 
-    const startValue = displayValue;
     const diff = value - startValue;
     const duration = Math.min(600, Math.max(200, Math.abs(diff) * 20));
     const startTime = performance.now();
@@ -29,12 +30,17 @@ export const AnimatedScore: React.FC<AnimatedScoreProps> = ({ value, className =
 
       if (progress < 1) {
         animationFrame = requestAnimationFrame(updateCounter);
+      } else {
+        prevValueRef.current = value;
       }
     };
 
     animationFrame = requestAnimationFrame(updateCounter);
-    return () => cancelAnimationFrame(animationFrame);
-  }, [value, displayValue]);
+    return () => {
+      cancelAnimationFrame(animationFrame);
+      prevValueRef.current = value;
+    };
+  }, [value]);
 
   return (
     <span className={`tabular-nums font-mono font-black ${className}`}>

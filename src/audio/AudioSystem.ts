@@ -87,27 +87,32 @@ export class AudioSystem {
   }
 
   private generateNoiseBuffers(ctx: AudioContext) {
-    const bufferSize = ctx.sampleRate; // 1 second buffer
-    this.whiteNoiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    this.pinkNoiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    try {
+      const sampleRate = Math.max(22050, Math.min(96000, ctx.sampleRate || 44100));
+      const bufferSize = sampleRate; // 1 second buffer
+      this.whiteNoiseBuffer = ctx.createBuffer(1, bufferSize, sampleRate);
+      this.pinkNoiseBuffer = ctx.createBuffer(1, bufferSize, sampleRate);
 
-    const whiteData = this.whiteNoiseBuffer.getChannelData(0);
-    const pinkData = this.pinkNoiseBuffer.getChannelData(0);
+      const whiteData = this.whiteNoiseBuffer.getChannelData(0);
+      const pinkData = this.pinkNoiseBuffer.getChannelData(0);
 
-    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
-    for (let i = 0; i < bufferSize; i++) {
-      const white = Math.random() * 2 - 1;
-      whiteData[i] = white;
+      let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+      for (let i = 0; i < bufferSize; i++) {
+        const white = Math.random() * 2 - 1;
+        whiteData[i] = white;
 
-      // Paul Kellet's filtered pink noise generator
-      b0 = 0.99886 * b0 + white * 0.0555179;
-      b1 = 0.99332 * b1 + white * 0.0750759;
-      b2 = 0.96900 * b2 + white * 0.1538520;
-      b3 = 0.86650 * b3 + white * 0.3104856;
-      b4 = 0.55000 * b4 + white * 0.5329522;
-      b5 = -0.7616 * b5 - white * 0.0168980;
-      pinkData[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
-      b6 = white * 0.115926;
+        // Paul Kellet's filtered pink noise generator
+        b0 = 0.99886 * b0 + white * 0.0555179;
+        b1 = 0.99332 * b1 + white * 0.0750759;
+        b2 = 0.96900 * b2 + white * 0.1538520;
+        b3 = 0.86650 * b3 + white * 0.3104856;
+        b4 = 0.55000 * b4 + white * 0.5329522;
+        b5 = -0.7616 * b5 - white * 0.0168980;
+        pinkData[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
+        b6 = white * 0.115926;
+      }
+    } catch {
+      // Noise buffers are optional fallbacks
     }
   }
 
@@ -686,7 +691,7 @@ export class AudioSystem {
 
     this.isMusicPlaying = true;
     this.current16thNote = 0;
-    this.nextNoteTime = ctx.currentTime + 0.05;
+    this.nextNoteTime = Math.max(ctx.currentTime + 0.05, 0.05);
 
     this.scheduleMusicLoop();
   }
@@ -721,9 +726,20 @@ export class AudioSystem {
     this.musicSchedulerTimer = window.setInterval(() => {
       if (!this.ctx || !this.isMusicPlaying) return;
 
-      while (this.nextNoteTime < this.ctx.currentTime + this.scheduleAheadTimeSec) {
+      // Prevent past-due runaway loop: catch up to current time
+      if (this.nextNoteTime < this.ctx.currentTime) {
+        this.nextNoteTime = this.ctx.currentTime;
+      }
+
+      // Hard cap iterations to prevent any potential main-thread hang
+      let safetyCounter = 0;
+      while (
+        this.nextNoteTime < this.ctx.currentTime + this.scheduleAheadTimeSec &&
+        safetyCounter < 16
+      ) {
         this.schedule16thNote(this.current16thNote, this.nextNoteTime);
         this.advance16thNote();
+        safetyCounter++;
       }
     }, this.lookaheadMs);
   }

@@ -8,14 +8,20 @@ interface AchievementsModalProps {
 }
 
 export const AchievementsModal: React.FC<AchievementsModalProps> = ({ stats, onClose }) => {
+  const isAchUnlocked = (id: string, condition: boolean) => {
+    return Boolean(stats.unlockedAchievements?.includes(id) || condition);
+  };
+
+  const highestLevel = stats.highestLevel ?? stats.level;
+
   const achievements = [
     {
       id: 'first_brick',
       title: 'First Strike',
       description: 'Break your first brick in the arcade',
       icon: <Target className="w-4 h-4 text-cyan-400" />,
-      unlocked: stats.bricksBroken >= 1,
-      progress: Math.min(1, stats.bricksBroken),
+      unlocked: isAchUnlocked('first_brick', stats.bricksBroken >= 1),
+      progress: Math.min(1, Math.max(stats.unlockedAchievements?.includes('first_brick') ? 1 : 0, stats.bricksBroken)),
       max: 1,
     },
     {
@@ -23,8 +29,8 @@ export const AchievementsModal: React.FC<AchievementsModalProps> = ({ stats, onC
       title: 'Combo Surge',
       description: 'Unleash a 5x combo multiplier',
       icon: <Flame className="w-4 h-4 text-amber-400" />,
-      unlocked: stats.maxCombo >= 5,
-      progress: Math.min(5, stats.maxCombo),
+      unlocked: isAchUnlocked('combo_master', stats.maxCombo >= 5),
+      progress: Math.min(5, Math.max(stats.unlockedAchievements?.includes('combo_master') ? 5 : 0, stats.maxCombo)),
       max: 5,
     },
     {
@@ -32,8 +38,8 @@ export const AchievementsModal: React.FC<AchievementsModalProps> = ({ stats, onC
       title: 'Brick Destroyer',
       description: 'Smash 50 total bricks',
       icon: <Zap className="w-4 h-4 text-yellow-400" />,
-      unlocked: stats.bricksBroken >= 50,
-      progress: Math.min(50, stats.bricksBroken),
+      unlocked: isAchUnlocked('brick_crusher', stats.bricksBroken >= 50),
+      progress: Math.min(50, Math.max(stats.unlockedAchievements?.includes('brick_crusher') ? 50 : 0, stats.bricksBroken)),
       max: 50,
     },
     {
@@ -41,8 +47,8 @@ export const AchievementsModal: React.FC<AchievementsModalProps> = ({ stats, onC
       title: 'Deep Run',
       description: 'Reach Level 3 or higher',
       icon: <Shield className="w-4 h-4 text-emerald-400" />,
-      unlocked: stats.level >= 3,
-      progress: Math.min(3, stats.level),
+      unlocked: isAchUnlocked('level_veteran', highestLevel >= 3),
+      progress: Math.min(3, Math.max(stats.unlockedAchievements?.includes('level_veteran') ? 3 : 0, highestLevel)),
       max: 3,
     },
     {
@@ -50,7 +56,7 @@ export const AchievementsModal: React.FC<AchievementsModalProps> = ({ stats, onC
       title: 'Score Hunter',
       description: 'Accumulate 250 points in a match',
       icon: <Star className="w-4 h-4 text-pink-400" />,
-      unlocked: stats.score >= 250 || stats.highScore >= 250,
+      unlocked: isAchUnlocked('high_score', stats.score >= 250 || stats.highScore >= 250),
       progress: Math.min(250, Math.max(stats.score, stats.highScore)),
       max: 250,
     },
@@ -59,8 +65,8 @@ export const AchievementsModal: React.FC<AchievementsModalProps> = ({ stats, onC
       title: 'Arcade Legend',
       description: 'Reach and conquer Level 10',
       icon: <Trophy className="w-4 h-4 text-amber-300" />,
-      unlocked: stats.level >= 10,
-      progress: Math.min(10, stats.level),
+      unlocked: isAchUnlocked('arcade_legend', highestLevel >= 10),
+      progress: Math.min(10, Math.max(stats.unlockedAchievements?.includes('arcade_legend') ? 10 : 0, highestLevel)),
       max: 10,
     },
   ];
@@ -70,7 +76,7 @@ export const AchievementsModal: React.FC<AchievementsModalProps> = ({ stats, onC
   return (
     <div
       id="achievements-modal"
-      className="absolute inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn select-none"
+      className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-fadeIn select-none"
     >
       <div className="w-full max-w-sm max-h-[90vh] bg-slate-900/95 border border-slate-700/80 rounded-2xl p-5 shadow-2xl flex flex-col text-slate-100 overflow-hidden">
         

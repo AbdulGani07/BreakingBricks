@@ -48,7 +48,7 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
   return (
     <div
       id="leaderboard-modal"
-      className="absolute inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn select-none"
+      className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-fadeIn select-none"
     >
       <div className="w-full max-w-sm max-h-[90vh] bg-slate-900/95 border border-slate-700/80 rounded-2xl p-5 shadow-2xl flex flex-col text-slate-100 overflow-hidden">
         

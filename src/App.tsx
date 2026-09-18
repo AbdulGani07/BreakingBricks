@@ -1,207 +1,169 @@
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
-import { GameEngine } from './game/GameEngine';
-import { GameCanvas } from './components/GameCanvas';
-import { ModernHUD } from './components/ModernHUD';
-import { MainMenu } from './components/MainMenu';
-import { PauseModal } from './components/PauseModal';
-import { GameOverModal } from './components/GameOverModal';
-import { VictoryModal } from './components/VictoryModal';
-import { SettingsModal } from './components/SettingsModal';
-import { AchievementsModal } from './components/AchievementsModal';
-import { LeaderboardModal } from './components/LeaderboardModal';
-import { ControlsGuide } from './components/ControlsGuide';
-import { GameStats, GameStatus } from './types';
-import { audioSystem } from './audio/AudioSystem';
+import React, { useState, useEffect } from 'react';
+import { EmbeddedGame } from './components/EmbeddedGame';
+import { DeveloperDocs } from './components/DeveloperDocs';
+import { DeveloperPlayground } from './components/DeveloperPlayground';
+import { EmbedView } from './components/EmbedView';
+import './sdk'; // Ensure window.BreakingBricks is initialized
+import { Gamepad2, Sparkles, BookOpen, ExternalLink, Code } from 'lucide-react';
+
+export type AppView = 'game' | 'playground' | 'docs' | 'embed';
+
+const determineInitialView = (): AppView => {
+  if (typeof window === 'undefined') return 'game';
+
+  const path = window.location.pathname.toLowerCase();
+  const search = window.location.search.toLowerCase();
+  const hash = window.location.hash.toLowerCase();
+
+  if (
+    path === '/embed' ||
+    path.startsWith('/embed/') ||
+    path.startsWith('/embed?') ||
+    path.includes('/embed') ||
+    search.includes('embed=true') ||
+    hash === '#/embed' ||
+    hash.startsWith('#/embed')
+  ) {
+    return 'embed';
+  }
+  if (path.includes('/docs') || hash === '#/docs') {
+    return 'docs';
+  }
+  if (path.includes('/playground') || hash === '#/playground') {
+    return 'playground';
+  }
+  return 'game';
+};
 
 export const App: React.FC = () => {
-  const [isMuted, setIsMuted] = useState(() => audioSystem.getSettings().isMuted);
-  const [status, setStatus] = useState<GameStatus>('idle');
-  const [, setTick] = useState(0);
+  const [currentView, setCurrentView] = useState<AppView>(determineInitialView);
 
-  // Modal dialog states
-  const [showSettings, setShowSettings] = useState(false);
-  const [showAchievements, setShowAchievements] = useState(false);
-  const [showLeaderboard, setShowLeaderboard] = useState(false);
-
-  // Subscribe to audio system changes
+  // Keep URL hash/history in sync with currentView
   useEffect(() => {
-    const unsub = audioSystem.subscribe((settings) => {
-      setIsMuted(settings.isMuted);
-    });
-    return unsub;
-  }, []);
+    if (typeof window === 'undefined') return;
 
-  // Sync background synth music with gameplay state
-  useEffect(() => {
-    if (status === 'playing') {
-      audioSystem.resumeMusic();
-    } else {
-      audioSystem.pauseMusic();
-    }
-  }, [status]);
-
-  // Initialize engine
-  const engine = useMemo(() => {
-    let eng: GameEngine;
-    eng = new GameEngine(() => {
-      setTick((t) => t + 1);
-      if (eng) {
-        setStatus(eng.status);
-      }
-    });
-    return eng;
-  }, []);
-
-  // Current reactive snapshot of game stats
-  const stats: GameStats = engine.getStats();
-
-  const handleToggleMute = useCallback(() => {
-    audioSystem.toggleMute();
-  }, []);
-
-  const handleTogglePause = useCallback(() => {
-    engine.togglePause();
-    setStatus(engine.status);
-  }, [engine]);
-
-  const handleStartGame = useCallback(() => {
-    engine.startCountdown();
-    setStatus(engine.status);
-  }, [engine]);
-
-  const handleRestart = useCallback(() => {
-    engine.restartGame();
-    setStatus(engine.status);
-  }, [engine]);
-
-  const handleReturnHome = useCallback(() => {
-    engine.returnToMainMenu();
-    setStatus(engine.status);
-  }, [engine]);
-
-  const handleStatusChange = useCallback((newStatus: GameStatus) => {
-    setStatus(newStatus);
-  }, []);
-
-  const handleResetHighScore = useCallback(() => {
-    localStorage.removeItem('breaking_bricks_high_score');
-    engine.highScore = 0;
-    setTick((t) => t + 1);
-  }, [engine]);
-
-  // Global key listener for quick Escape to Pause or Close Modals
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        if (showSettings || showAchievements || showLeaderboard) {
-          setShowSettings(false);
-          setShowAchievements(false);
-          setShowLeaderboard(false);
-        } else if (engine.status === 'playing' || engine.status === 'paused') {
-          engine.togglePause();
-          setStatus(engine.status);
-        }
-      }
+    const handleUrlChange = () => {
+      setCurrentView(determineInitialView());
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [engine, showSettings, showAchievements, showLeaderboard]);
+    window.addEventListener('hashchange', handleUrlChange);
+    window.addEventListener('popstate', handleUrlChange);
+    return () => {
+      window.removeEventListener('hashchange', handleUrlChange);
+      window.removeEventListener('popstate', handleUrlChange);
+    };
+  }, []);
+
+  const navigateTo = (view: AppView) => {
+    setCurrentView(view);
+    if (typeof window !== 'undefined') {
+      window.location.hash = `#/${view}`;
+    }
+  };
+
+  // If in iframe embed mode, return isolated embed view without top navigation chrome
+  if (currentView === 'embed') {
+    return <EmbedView />;
+  }
 
   return (
-    <main className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-3 sm:p-6 text-slate-100 selection:bg-cyan-500/30 overflow-x-hidden">
-      <div className="relative w-full max-w-[600px] flex flex-col items-center">
-        
-        {/* VIEW 1: MAIN MENU */}
-        {status === 'idle' ? (
-          <MainMenu
-            onStartGame={handleStartGame}
-            onOpenSettings={() => setShowSettings(true)}
-            onOpenAchievements={() => setShowAchievements(true)}
-            onOpenLeaderboard={() => setShowLeaderboard(true)}
-            highScore={stats.highScore}
-          />
-        ) : (
-          /* VIEW 2: ACTIVE GAME WITH MODERN HUD & CANVAS */
-          <div className="relative w-full flex flex-col items-center">
-            {/* Cyber Glassmorphism HUD */}
-            <ModernHUD
-              stats={stats}
-              status={status}
-              isMuted={isMuted}
-              onToggleMute={handleToggleMute}
-              onTogglePause={handleTogglePause}
-              onOpenSettings={() => setShowSettings(true)}
-              ballCount={engine.balls.length}
-            />
-
-            {/* High-DPI Arcade Canvas Container */}
-            <div className="relative w-full rounded-2xl overflow-hidden shadow-2xl border border-slate-800">
-              <GameCanvas
-                engine={engine}
-                status={status}
-                onStatusChange={handleStatusChange}
-              />
-
-              {/* Pause Modal */}
-              {status === 'paused' && (
-                <PauseModal
-                  stats={stats}
-                  onResume={handleTogglePause}
-                  onRestart={handleRestart}
-                  onOpenSettings={() => setShowSettings(true)}
-                  onHome={handleReturnHome}
-                />
-              )}
-
-              {/* Game Over Modal */}
-              {status === 'game_over' && (
-                <GameOverModal
-                  stats={stats}
-                  onRetry={handleRestart}
-                  onHome={handleReturnHome}
-                />
-              )}
-
-              {/* Victory Modal */}
-              {status === 'game_won' && (
-                <VictoryModal
-                  stats={stats}
-                  onRetry={handleRestart}
-                  onHome={handleReturnHome}
-                />
-              )}
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-sky-500/30">
+      {/* Platform Navigation Bar */}
+      <nav
+        id="platform-navbar"
+        className="w-full border-b border-slate-800/80 bg-slate-900/80 backdrop-blur sticky top-0 z-40 px-4 sm:px-6 py-2.5 flex items-center justify-between"
+      >
+        <div className="flex items-center gap-3">
+          <button
+            id="nav-brand-logo"
+            onClick={() => navigateTo('game')}
+            className="flex items-center gap-2.5 text-left group"
+          >
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-sky-500 via-indigo-600 to-fuchsia-600 flex items-center justify-center font-black text-white text-sm shadow-md shadow-sky-500/20 group-hover:scale-105 transition-transform">
+              BB
             </div>
+            <div>
+              <div className="text-sm font-bold tracking-tight text-white flex items-center gap-1.5">
+                Breaking Bricks
+                <span className="text-[10px] px-1.5 py-0.2 rounded bg-sky-500/15 text-sky-400 font-mono border border-sky-500/30">
+                  Platform
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-400 leading-tight">HTML5 Arcade Engine & Developer SDK</div>
+            </div>
+          </button>
+        </div>
 
-            {/* Controls Guide Footer */}
-            <ControlsGuide />
-          </div>
+        {/* View Switcher Tabs */}
+        <div className="flex items-center gap-1.5 bg-slate-950/80 p-1 rounded-xl border border-slate-800">
+          <button
+            id="nav-tab-arcade"
+            onClick={() => navigateTo('game')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              currentView === 'game'
+                ? 'bg-sky-600 text-white shadow-md shadow-sky-600/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Gamepad2 className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Play Arcade</span>
+          </button>
+
+          <button
+            id="nav-tab-playground"
+            onClick={() => navigateTo('playground')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              currentView === 'playground'
+                ? 'bg-sky-600 text-white shadow-md shadow-sky-600/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Playground</span>
+          </button>
+
+          <button
+            id="nav-tab-docs"
+            onClick={() => navigateTo('docs')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              currentView === 'docs'
+                ? 'bg-sky-600 text-white shadow-md shadow-sky-600/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Docs (/docs)</span>
+          </button>
+
+          <button
+            id="nav-tab-embed-preview"
+            onClick={() => navigateTo('embed')}
+            title="Preview isolated iframe view"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-slate-200 hover:bg-slate-900 transition-all"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">Embed View</span>
+          </button>
+        </div>
+      </nav>
+
+      {/* View Content */}
+      <div className="flex-1 flex flex-col">
+        {currentView === 'game' && (
+          <main className="flex-1 flex flex-col items-center justify-center p-2 sm:p-4 md:p-6">
+            <EmbeddedGame />
+          </main>
         )}
 
-        {/* FLOATING OVERLAY MODALS (Accessible anywhere) */}
-        {showSettings && (
-          <SettingsModal
-            onResetHighScore={handleResetHighScore}
-            onClose={() => setShowSettings(false)}
-          />
+        {currentView === 'playground' && (
+          <DeveloperPlayground onNavigateToDocs={() => navigateTo('docs')} />
         )}
 
-        {showAchievements && (
-          <AchievementsModal
-            stats={stats}
-            onClose={() => setShowAchievements(false)}
-          />
-        )}
-
-        {showLeaderboard && (
-          <LeaderboardModal
-            playerHighScore={stats.highScore}
-            playerLevel={stats.level}
-            onClose={() => setShowLeaderboard(false)}
-          />
+        {currentView === 'docs' && (
+          <DeveloperDocs onNavigateToPlayground={() => navigateTo('playground')} />
         )}
       </div>
-    </main>
+    </div>
   );
 };
 

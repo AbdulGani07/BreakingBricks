@@ -188,6 +188,9 @@ export interface GameStats {
   highScore: number;
   lives: number;
   level: number;
+  highestLevel?: number;
+  gamesPlayed?: number;
+  unlockedAchievements?: string[];
   bricksBroken: number;
   totalBricksInLevel: number;
   remainingBricks: number;

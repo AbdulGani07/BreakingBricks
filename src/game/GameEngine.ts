@@ -26,6 +26,18 @@ import {
   createLaserBolts,
   updateLaserBolts,
 } from './PowerUp';
+import {
+  ScoreAdapter,
+  GameDifficulty,
+  DifficultyConfig,
+  BreakingBricksConfig,
+  AnalyticsAdapter,
+} from '../sdk/types';
+import { LocalStorageAdapter } from '../sdk/ScoreAdapter';
+import { GameEventEmitter } from '../sdk/EventEmitter';
+import { resolveDifficultyConfig } from '../sdk/difficulty';
+import { ScoreManager } from '../sdk/score/ScoreManager';
+import { LocalAnalyticsAdapter } from '../sdk/analytics/AnalyticsAdapter';
 
 export const CANVAS_WIDTH = 600;
 export const CANVAS_HEIGHT = 400;
@@ -65,38 +77,126 @@ export class GameEngine {
 
   private onStateChange?: () => void;
 
-  constructor(onStateChange?: () => void) {
+  // SDK Architecture & Platform Additions
+  public scoreAdapter: ScoreAdapter;
+  public scoreManager: ScoreManager;
+  public analyticsAdapter: AnalyticsAdapter;
+  public eventEmitter: GameEventEmitter;
+  public difficulty: GameDifficulty = 'normal';
+  public difficultyConfig: DifficultyConfig;
+  public unlockedAchievements: Set<string> = new Set();
+  public highestLevel: number = 1;
+  public gamesPlayed: number = 0;
+  public gameCountedThisSession: boolean = false;
+  public sessionActive: boolean = false;
+  public livesLostInLevel: number = 0;
+  private activePlayTimeSeconds: number = 0;
+  private playTimeTicker: number = 0;
+
+  constructor(
+    onStateChange?: () => void,
+    config?: BreakingBricksConfig,
+    eventEmitter?: GameEventEmitter
+  ) {
     this.onStateChange = onStateChange;
+    this.eventEmitter = eventEmitter || new GameEventEmitter();
+    this.scoreAdapter = config?.scoreAdapter || new LocalStorageAdapter();
+    this.scoreManager = new ScoreManager(this.scoreAdapter, config?.saveScore);
+    this.analyticsAdapter = config?.analyticsAdapter || new LocalAnalyticsAdapter();
+    this.difficulty = config?.difficulty || 'normal';
+    this.difficultyConfig = resolveDifficultyConfig(this.difficulty, config?.difficultySettings);
+
+    const startingPaddleWidth = Math.round(60 * this.difficultyConfig.paddleWidthMultiplier);
+    this.lives = this.difficultyConfig.startingLives;
+
     this.paddle = {
-      x: 250,
+      x: (CANVAS_WIDTH - startingPaddleWidth) / 2,
       y: 350,
-      width: 60,
+      width: startingPaddleWidth,
       height: 10,
       speed: 10,
       color: '#3b82f6', // Blue as in original Java Paddle.java
     };
 
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('breaking_bricks_high_score');
-      if (saved) {
-        this.highScore = parseInt(saved, 10) || 0;
-      }
+    // Asynchronously load persistent statistics from the configured ScoreAdapter
+    if (this.scoreAdapter.getStats) {
+      Promise.resolve(this.scoreAdapter.getStats())
+        .then((savedStats) => {
+          if (savedStats) {
+            if (typeof savedStats.highScore === 'number' && savedStats.highScore > 0) {
+              this.highScore = savedStats.highScore;
+            }
+            if (typeof savedStats.highestLevel === 'number' && savedStats.highestLevel > 1) {
+              this.highestLevel = savedStats.highestLevel;
+            }
+            if (typeof savedStats.gamesPlayed === 'number' && savedStats.gamesPlayed > 0) {
+              this.gamesPlayed = savedStats.gamesPlayed;
+            }
+            if (Array.isArray(savedStats.achievements)) {
+              savedStats.achievements.forEach((id) => this.unlockedAchievements.add(id));
+            }
+            this.notify();
+          }
+        })
+        .catch((err) => {
+          console.warn('[BreakingBricks] Failed to load initial stats:', err);
+        });
+    } else {
+      Promise.resolve(this.scoreAdapter.getHighScore())
+        .then((savedScore) => {
+          if (typeof savedScore === 'number' && savedScore > 0) {
+            this.highScore = savedScore;
+            this.notify();
+          }
+        })
+        .catch((err) => {
+          console.warn('[BreakingBricks] Failed to load initial high score:', err);
+        });
     }
 
     this.resetBalls();
     this.createBricksForLevel(this.level);
   }
 
+  public setDifficulty(difficulty: GameDifficulty, customSettings?: Partial<DifficultyConfig>) {
+    this.difficulty = difficulty;
+    this.difficultyConfig = resolveDifficultyConfig(difficulty, customSettings);
+    this.paddle.width = Math.round(60 * this.difficultyConfig.paddleWidthMultiplier);
+    this.notify();
+  }
+
+  public updateConfig(config?: BreakingBricksConfig, eventEmitter?: GameEventEmitter) {
+    if (eventEmitter) {
+      this.eventEmitter = eventEmitter;
+    }
+    if (config) {
+      if (config.difficulty && config.difficulty !== this.difficulty) {
+        this.setDifficulty(config.difficulty, config.difficultySettings);
+      }
+      if (config.saveScore) {
+        this.scoreManager = new ScoreManager(this.scoreAdapter, config.saveScore);
+      }
+      if (config.scoreAdapter && config.scoreAdapter !== this.scoreAdapter) {
+        this.scoreAdapter = config.scoreAdapter;
+        this.scoreManager = new ScoreManager(this.scoreAdapter, config.saveScore);
+      }
+      if (config.analyticsAdapter) {
+        this.analyticsAdapter = config.analyticsAdapter;
+      }
+    }
+  }
+
   public resetBalls() {
+    const speedMult = this.difficultyConfig?.ballSpeedMultiplier || 1.0;
     this.balls = [
       {
         id: 'ball-1',
         x: 300 - 10,
         y: 200,
         radius: 10,
-        speed: 4,
-        dx: 2.8,
-        dy: -3.2,
+        speed: 4 * speedMult,
+        dx: 2.8 * speedMult,
+        dy: -3.2 * speedMult,
         color: '#ef4444', // Red as in original Java Ball.java
       },
     ];
@@ -123,6 +223,38 @@ export class GameEngine {
         audioSystem.playCountdown(true);
         this.status = 'playing';
         this.notify();
+
+        if (!this.sessionActive) {
+          this.sessionActive = true;
+          this.activePlayTimeSeconds = 0;
+          this.playTimeTicker = 0;
+          this.livesLostInLevel = 0;
+          if (!this.gameCountedThisSession) {
+            this.gameCountedThisSession = true;
+            this.gamesPlayed++;
+            if (this.scoreAdapter.recordGamePlayed) {
+              Promise.resolve(this.scoreAdapter.recordGamePlayed()).catch(() => {});
+            }
+          }
+          const newSessionId = this.scoreManager.startNewSession();
+          const sessionPayload = {
+            sessionId: newSessionId,
+            timestamp: Date.now(),
+            difficulty: this.difficulty,
+          };
+          this.eventEmitter.emit('sessionStarted', sessionPayload);
+          this.analyticsAdapter.trackEvent('sessionStarted', sessionPayload, newSessionId);
+        }
+
+        const gameStartedPayload = {
+          level: this.level,
+          lives: this.lives,
+          difficulty: this.difficulty,
+          sessionId: this.scoreManager.getSessionId(),
+          timestamp: Date.now(),
+        };
+        this.eventEmitter.emit('gameStarted', gameStartedPayload);
+        this.analyticsAdapter.trackEvent('gameStarted', gameStartedPayload, this.scoreManager.getSessionId());
       }
     }, 1000);
   }
@@ -139,9 +271,12 @@ export class GameEngine {
   public restartGame() {
     if (this.countdownTimer) clearInterval(this.countdownTimer);
     this.countdownTimer = null;
+    this.sessionActive = false;
+    this.gameCountedThisSession = false;
     this.score = 0;
-    this.lives = 3;
+    this.lives = this.difficultyConfig.startingLives;
     this.level = 1;
+    this.livesLostInLevel = 0;
     this.combo = 0;
     this.maxCombo = 0;
     this.bricksBroken = 0;
@@ -149,13 +284,12 @@ export class GameEngine {
     this.particles = [];
     this.floatingTexts = [];
     this.activeBuffs = [];
-    this.powerUps = [];
     this.laserBolts = [];
     this.shieldActive = false;
     this.paddle.hasLaser = false;
     this.paddle.hasMagnet = false;
-    this.paddle.width = 60;
-    this.paddle.x = 250;
+    this.paddle.width = Math.round(60 * this.difficultyConfig.paddleWidthMultiplier);
+    this.paddle.x = (CANVAS_WIDTH - this.paddle.width) / 2;
     this.resetBalls();
     this.createBricksForLevel(this.level);
     this.status = 'idle';
@@ -166,10 +300,13 @@ export class GameEngine {
   public returnToMainMenu() {
     if (this.countdownTimer) clearInterval(this.countdownTimer);
     this.countdownTimer = null;
+    this.sessionActive = false;
+    this.gameCountedThisSession = false;
     this.status = 'idle';
     this.score = 0;
-    this.lives = 3;
+    this.lives = this.difficultyConfig.startingLives;
     this.level = 1;
+    this.livesLostInLevel = 0;
     this.combo = 0;
     this.maxCombo = 0;
     this.bricksBroken = 0;
@@ -181,10 +318,18 @@ export class GameEngine {
     this.shieldActive = false;
     this.paddle.hasLaser = false;
     this.paddle.hasMagnet = false;
-    this.paddle.width = 60;
-    this.paddle.x = 250;
+    this.paddle.width = Math.round(60 * this.difficultyConfig.paddleWidthMultiplier);
+    this.paddle.x = (CANVAS_WIDTH - this.paddle.width) / 2;
     this.resetBalls();
     this.createBricksForLevel(this.level);
+    this.notify();
+  }
+
+  public resetStoredStats() {
+    this.highScore = 0;
+    this.highestLevel = 1;
+    this.gamesPlayed = 0;
+    this.unlockedAchievements.clear();
     this.notify();
   }
 
@@ -399,6 +544,21 @@ export class GameEngine {
     }
 
     this.gameTime += deltaTime;
+
+    // Track active play time for analytics
+    if (this.status === 'playing') {
+      this.playTimeTicker += deltaTime;
+      if (this.playTimeTicker >= 5) {
+        this.playTimeTicker = 0;
+        this.activePlayTimeSeconds += 5;
+        const ptPayload = {
+          sessionId: this.scoreManager.getSessionId(),
+          activePlayTimeSeconds: this.activePlayTimeSeconds,
+        };
+        this.eventEmitter.emit('playTimeUpdated', ptPayload);
+        this.analyticsAdapter.trackEvent('playTimeUpdated', ptPayload, ptPayload.sessionId);
+      }
+    }
 
     // Update moving bricks and animation phases
     updateBricks(this.bricks, deltaTime);
@@ -745,6 +905,22 @@ export class GameEngine {
     const earnedPoints = brick.points * comboMultiplier;
     this.addScore(earnedPoints);
 
+    this.bricksBroken++;
+    this.scoreManager.recordBrickBroken(this.combo);
+
+    this.eventEmitter.emit('brickDestroyed', {
+      brickType: brick.type,
+      score: this.score,
+      combo: this.combo,
+      position: { x: brick.x, y: brick.y },
+    });
+
+    this.analyticsAdapter.trackEvent('brickDestroyed', {
+      brickType: brick.type,
+      score: this.score,
+      combo: this.combo,
+    }, this.scoreManager.getSessionId());
+
     audioSystem.playBrickDestroy(this.combo);
     this.spawnBrickExplosion(brick);
     this.spawnShockwave(brick.x + brick.width / 2, brick.y + brick.height / 2, brick.color, 36);
@@ -837,6 +1013,15 @@ export class GameEngine {
   private applyPowerUp(type: PowerUpType, x: number, y: number) {
     const config = POWER_UP_CONFIGS[type];
     let text = config ? config.name.toUpperCase() + '!' : 'POWER UP!';
+
+    this.scoreManager.recordPowerUp();
+    const puPayload = {
+      type,
+      duration: config?.duration,
+      position: { x, y },
+    };
+    this.eventEmitter.emit('powerUpUsed', puPayload);
+    this.analyticsAdapter.trackEvent('powerUpUsed', puPayload, this.scoreManager.getSessionId());
 
     switch (type) {
       case 'multi_ball': {
@@ -946,8 +1131,58 @@ export class GameEngine {
       this.spawnShockwave(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, '#fbbf24', 220, 3);
       this.addTrauma(0.35);
 
+      const isPerfect = this.livesLostInLevel === 0;
+      this.scoreManager.recordLevelCleared();
+
+      const levelCompletedPayload = {
+        level: this.level,
+        score: this.score,
+        perfect: isPerfect,
+        sessionId: this.scoreManager.getSessionId(),
+      };
+      this.eventEmitter.emit('levelCompleted', levelCompletedPayload);
+      this.analyticsAdapter.trackEvent('levelCompleted', levelCompletedPayload, levelCompletedPayload.sessionId);
+
+      if (isPerfect) {
+        const perfPayload = { level: this.level, score: this.score };
+        this.eventEmitter.emit('perfectLevelCompleted', perfPayload);
+        this.analyticsAdapter.trackEvent('perfectLevelCompleted', perfPayload, this.scoreManager.getSessionId());
+      }
+
       if (this.level >= 10) {
         this.status = 'game_won';
+        const validatedPayload = this.scoreManager.createValidatedPayload(this.score, this.level);
+        this.scoreManager
+          .submitScore(this.score, this.level, {
+            highestLevel: Math.max(this.highestLevel, this.level),
+            gamesPlayed: this.gamesPlayed,
+            achievements: Array.from(this.unlockedAchievements),
+          })
+          .catch((err) => {
+            console.warn('[BreakingBricks:ScoreManager] Score submission failed:', err);
+          });
+
+        const gameOverPayload = {
+          score: this.score,
+          level: this.level,
+          isHighScore: this.score >= this.highScore,
+          bricksBroken: this.bricksBroken,
+          sessionId: this.scoreManager.getSessionId(),
+          validationToken: validatedPayload.validationHash,
+        };
+        this.eventEmitter.emit('gameOver', gameOverPayload);
+        this.analyticsAdapter.trackEvent('gameOver', gameOverPayload, this.scoreManager.getSessionId());
+
+        const sessionEndPayload = {
+          sessionId: this.scoreManager.getSessionId(),
+          durationSeconds: validatedPayload.metadata.durationSeconds,
+          finalScore: this.score,
+          levelReached: this.level,
+          bricksBroken: this.bricksBroken,
+        };
+        this.eventEmitter.emit('sessionEnded', sessionEndPayload);
+        this.analyticsAdapter.trackEvent('sessionEnded', sessionEndPayload, sessionEndPayload.sessionId);
+        this.sessionActive = false;
       } else {
         this.status = 'level_cleared';
         setTimeout(() => {
@@ -960,39 +1195,128 @@ export class GameEngine {
 
   public nextLevel() {
     this.level++;
+    if (this.level > this.highestLevel) {
+      this.highestLevel = this.level;
+      if (this.scoreAdapter.saveHighestLevel) {
+        Promise.resolve(this.scoreAdapter.saveHighestLevel(this.highestLevel)).catch(() => {});
+      }
+    }
+    this.livesLostInLevel = 0;
     this.resetBalls();
-    this.paddle.x = 250;
-    this.paddle.width = 60;
+    this.paddle.width = Math.round(60 * this.difficultyConfig.paddleWidthMultiplier);
+    this.paddle.x = (CANVAS_WIDTH - this.paddle.width) / 2;
     this.powerUps = [];
     this.createBricksForLevel(this.level);
     this.startCountdown();
   }
 
   public addScore(points: number) {
-    this.score += points;
+    const pointsMult = this.difficultyConfig?.pointsMultiplier || 1.0;
+    const finalPoints = Math.round(points * pointsMult);
+    this.score += finalPoints;
+
+    const scorePayload = {
+      score: this.score,
+      combo: this.combo,
+      added: finalPoints,
+      sessionId: this.scoreManager.getSessionId(),
+    };
+    this.eventEmitter.emit('scoreUpdated', scorePayload);
+    this.analyticsAdapter.trackEvent('scoreUpdated', scorePayload, this.scoreManager.getSessionId());
+
     if (this.score > this.highScore) {
       this.highScore = this.score;
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('breaking_bricks_high_score', this.highScore.toString());
+      Promise.resolve(this.scoreAdapter.saveHighScore(this.highScore)).catch((err) => {
+        console.warn('[BreakingBricks] Error saving score via adapter:', err);
+      });
+    }
+
+    this.checkAchievements();
+    this.notify();
+  }
+
+  private checkAchievements() {
+    const checkList = [
+      { id: 'first_brick', title: 'First Strike', description: 'Break your first brick in the arcade', condition: this.bricksBroken >= 1 },
+      { id: 'combo_master', title: 'Combo Surge', description: 'Unleash a 5x combo multiplier', condition: this.maxCombo >= 5 },
+      { id: 'brick_crusher', title: 'Brick Destroyer', description: 'Smash 50 total bricks', condition: this.bricksBroken >= 50 },
+      { id: 'level_veteran', title: 'Deep Run', description: 'Reach Level 3 or higher', condition: this.level >= 3 },
+      { id: 'high_score', title: 'Score Hunter', description: 'Accumulate 250 points in a match', condition: this.score >= 250 || this.highScore >= 250 },
+      { id: 'arcade_legend', title: 'Arcade Legend', description: 'Reach and conquer Level 10', condition: this.level >= 10 },
+    ];
+
+    for (const ach of checkList) {
+      if (ach.condition && !this.unlockedAchievements.has(ach.id)) {
+        this.unlockedAchievements.add(ach.id);
+        if (this.scoreAdapter.saveAchievements) {
+          Promise.resolve(this.scoreAdapter.saveAchievements(Array.from(this.unlockedAchievements))).catch(() => {});
+        }
+        this.eventEmitter.emit('achievementUnlocked', {
+          id: ach.id,
+          title: ach.title,
+          description: ach.description,
+        });
       }
     }
-    this.notify();
   }
 
   public loseLife() {
     this.lives--;
     this.combo = 0;
+    this.livesLostInLevel++;
+    this.scoreManager.recordBallLost();
+
+    const playerDiedPayload = {
+      remainingLives: Math.max(0, this.lives),
+      level: this.level,
+      score: this.score,
+    };
+    this.eventEmitter.emit('playerDied', playerDiedPayload);
+    this.analyticsAdapter.trackEvent('playerDied', playerDiedPayload, this.scoreManager.getSessionId());
+
     audioSystem.playLifeLost();
     this.addTrauma(0.5);
     this.impactVignette = 1.0;
 
     if (this.lives <= 0) {
       this.status = 'game_over';
+      const validatedPayload = this.scoreManager.createValidatedPayload(this.score, this.level);
+      this.scoreManager
+        .submitScore(this.score, this.level, {
+          highestLevel: this.highestLevel,
+          gamesPlayed: this.gamesPlayed,
+          achievements: Array.from(this.unlockedAchievements),
+        })
+        .catch((err) => {
+          console.warn('[BreakingBricks:ScoreManager] Score submission failed:', err);
+        });
+
+      const gameOverPayload = {
+        score: this.score,
+        level: this.level,
+        isHighScore: this.score >= this.highScore,
+        bricksBroken: this.bricksBroken,
+        sessionId: this.scoreManager.getSessionId(),
+        validationToken: validatedPayload.validationHash,
+      };
+      this.eventEmitter.emit('gameOver', gameOverPayload);
+      this.analyticsAdapter.trackEvent('gameOver', gameOverPayload, this.scoreManager.getSessionId());
+
+      const sessionEndPayload = {
+        sessionId: this.scoreManager.getSessionId(),
+        durationSeconds: validatedPayload.metadata.durationSeconds,
+        finalScore: this.score,
+        levelReached: this.level,
+        bricksBroken: this.bricksBroken,
+      };
+      this.eventEmitter.emit('sessionEnded', sessionEndPayload);
+      this.analyticsAdapter.trackEvent('sessionEnded', sessionEndPayload, sessionEndPayload.sessionId);
+      this.sessionActive = false;
       this.notify();
     } else {
       this.resetBalls();
-      this.paddle.x = 250;
-      this.paddle.width = 60;
+      this.paddle.width = Math.round(60 * this.difficultyConfig.paddleWidthMultiplier);
+      this.paddle.x = (CANVAS_WIDTH - this.paddle.width) / 2;
       this.startCountdown();
     }
   }
@@ -1082,6 +1406,9 @@ export class GameEngine {
       highScore: this.highScore,
       lives: this.lives,
       level: this.level,
+      highestLevel: this.highestLevel,
+      gamesPlayed: this.gamesPlayed,
+      unlockedAchievements: Array.from(this.unlockedAchievements),
       bricksBroken: this.bricksBroken,
       totalBricksInLevel: this.totalBricksInLevel,
       remainingBricks,
